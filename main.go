@@ -8,10 +8,7 @@ import (
 )
 
 // apiConfig holds any stateful, in-memory data we need to keep track of.
-// Using a struct like this allows us to cleanly pass state to our handlers.
 type apiConfig struct {
-	// fileserverHits uses the atomic package to safely increment the integer
-	// across multiple goroutines (HTTP requests).
 	fileserverHits atomic.Int32
 }
 
@@ -19,21 +16,20 @@ func main() {
 	// Create a new ServeMux.
 	mux := http.NewServeMux()
 
-	// Instantiate our API configuration. This holds the state.
+	// Instantiate our API configuration.
 	apiCfg := &apiConfig{}
 
-	// Create a file server handler that serves files out of the current directory.
+	// Create a file server handler.
 	const filepathRoot = "."
 	fileServer := http.FileServer(http.Dir(filepathRoot))
-	
-	// Wrap the file server handler with our new metrics middleware.
-	// All requests to /app/ will now pass through middlewareMetricsInc first.
+
+	// Register handlers for static assets and the main app page.
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app", fileServer)))
 
-	// Register the readiness and metrics handlers.
-	mux.HandleFunc("/healthz", handlerReadiness)
-	mux.HandleFunc("/metrics", apiCfg.handlerMetrics)
-	mux.HandleFunc("/reset", apiCfg.handlerReset)
+	// Register API endpoints with method-specific routing.
+	mux.HandleFunc("GET /healthz", handlerReadiness)
+	mux.HandleFunc("GET /metrics", apiCfg.handlerMetrics)
+	mux.HandleFunc("POST /reset", apiCfg.handlerReset)
 
 	// Create a new http.Server struct.
 	server := &http.Server{
@@ -49,24 +45,18 @@ func main() {
 	}
 }
 
-// middlewareMetricsInc is a middleware that increments the fileserverHits counter.
+// middlewareMetricsInc increments the fileserverHits counter.
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
-	// http.HandlerFunc is an adapter that allows us to use an ordinary function
-	// as an HTTP handler.
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Increment the counter. .Add(1) is a thread-safe way to do this.
 		cfg.fileserverHits.Add(1)
-		// Call the next handler in the chain.
 		next.ServeHTTP(w, r)
 	})
 }
 
 // handlerMetrics writes the number of requests that have been counted.
-// It's a method on *apiConfig so it can access the fileserverHits data.
 func (cfg *apiConfig) handlerMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	// .Load() is the thread-safe way to read the value.
 	hits := cfg.fileserverHits.Load()
 	body := fmt.Sprintf("Hits: %d", hits)
 	w.Write([]byte(body))
@@ -76,7 +66,6 @@ func (cfg *apiConfig) handlerMetrics(w http.ResponseWriter, r *http.Request) {
 func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	// .Store(0) is the thread-safe way to set the value.
 	cfg.fileserverHits.Store(0)
 }
 
