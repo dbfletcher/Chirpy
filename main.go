@@ -24,12 +24,13 @@ func main() {
 	fileServer := http.FileServer(http.Dir(filepathRoot))
 
 	// Register handlers for static assets and the main app page.
+	// This remains under the /app/ path.
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app", fileServer)))
 
-	// Register API endpoints with method-specific routing.
-	mux.HandleFunc("GET /healthz", handlerReadiness)
-	mux.HandleFunc("GET /metrics", apiCfg.handlerMetrics)
-	mux.HandleFunc("POST /reset", apiCfg.handlerReset)
+	// Register API endpoints under the /api namespace.
+	mux.HandleFunc("GET /api/healthz", handlerReadiness)
+	mux.HandleFunc("GET /api/metrics", apiCfg.handlerMetrics)
+	mux.HandleFunc("POST /api/reset", apiCfg.handlerReset)
 
 	// Create a new http.Server struct.
 	server := &http.Server{
