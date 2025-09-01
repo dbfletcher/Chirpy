@@ -26,10 +26,11 @@ type apiConfig struct {
 }
 
 type User struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
+	ID          uuid.UUID `json:"id"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Email       string    `json:"email"`
+	IsChirpyRed bool      `json:"is_chirpy_red"`
 }
 
 type Chirp struct {
@@ -84,7 +85,8 @@ func main() {
 	mux.HandleFunc("POST /api/chirps", apiCfg.handlerChirpsCreate)
 	mux.HandleFunc("GET /api/chirps", apiCfg.handlerChirpsGet)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handlerChirpsGetByID)
-	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.handlerChirpsDelete) // New endpoint
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.handlerChirpsDelete)
+	mux.HandleFunc("POST /api/polka/webhooks", apiCfg.handlerWebhookPolka) // New endpoint
 
 	// Admin endpoints
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerMetrics)
@@ -100,6 +102,41 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+func (cfg *apiConfig) handlerWebhookPolka(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserID uuid.UUID `json:"user_id"`
+		} `json:"data"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+
+	if params.Event != "user.upgraded" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	_, err = cfg.DB.UpgradeUserToChirpyRed(r.Context(), params.Data.UserID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		log.Printf("Error upgrading user: %s", err)
+		respondWithError(w, http.StatusInternalServerError, "Couldn't upgrade user")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (cfg *apiConfig) handlerChirpsDelete(w http.ResponseWriter, r *http.Request) {
@@ -127,7 +164,6 @@ func (cfg *apiConfig) handlerChirpsDelete(w http.ResponseWriter, r *http.Request
 			respondWithError(w, http.StatusNotFound, "Chirp not found")
 			return
 		}
-		log.Printf("Error getting chirp: %s", err)
 		respondWithError(w, http.StatusInternalServerError, "Couldn't retrieve chirp")
 		return
 	}
@@ -139,7 +175,6 @@ func (cfg *apiConfig) handlerChirpsDelete(w http.ResponseWriter, r *http.Request
 
 	err = cfg.DB.DeleteChirp(r.Context(), chirpID)
 	if err != nil {
-		log.Printf("Error deleting chirp: %s", err)
 		respondWithError(w, http.StatusInternalServerError, "Couldn't delete chirp")
 		return
 	}
@@ -183,16 +218,16 @@ func (cfg *apiConfig) handlerUsersUpdate(w http.ResponseWriter, r *http.Request)
 		ID:             userID,
 	})
 	if err != nil {
-		log.Printf("Error updating user: %s", err)
 		respondWithError(w, http.StatusInternalServerError, "Couldn't update user")
 		return
 	}
 
 	respondWithJSON(w, http.StatusOK, User{
-		ID:        user.ID,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
+		ID:          user.ID,
+		CreatedAt:   user.CreatedAt,
+		UpdatedAt:   user.UpdatedAt,
+		Email:       user.Email,
+		IsChirpyRed: user.IsChirpyRed,
 	})
 }
 
@@ -205,7 +240,6 @@ func (cfg *apiConfig) handlerRevoke(w http.ResponseWriter, r *http.Request) {
 
 	err = cfg.DB.RevokeRefreshToken(r.Context(), token)
 	if err != nil {
-		log.Printf("Error revoking token: %s", err)
 		respondWithError(w, http.StatusInternalServerError, "Couldn't revoke session")
 		return
 	}
@@ -226,12 +260,7 @@ func (cfg *apiConfig) handlerRefresh(w http.ResponseWriter, r *http.Request) {
 
 	dbRefreshToken, err := cfg.DB.GetRefreshToken(r.Context(), refreshToken)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			respondWithError(w, http.StatusUnauthorized, "Invalid refresh token")
-			return
-		}
-		log.Printf("Error getting refresh token: %s", err)
-		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
+		respondWithError(w, http.StatusUnauthorized, "Invalid refresh token")
 		return
 	}
 
@@ -246,7 +275,6 @@ func (cfg *apiConfig) handlerRefresh(w http.ResponseWriter, r *http.Request) {
 
 	user, err := cfg.DB.GetUserForRefreshToken(r.Context(), refreshToken)
 	if err != nil {
-		log.Printf("Error getting user for refresh token: %s", err)
 		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
 		return
 	}
@@ -317,10 +345,11 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 
 	respondWithJSON(w, http.StatusOK, response{
 		User: User{
-			ID:        user.ID,
-			CreatedAt: user.CreatedAt,
-			UpdatedAt: user.UpdatedAt,
-			Email:     user.Email,
+			ID:          user.ID,
+			CreatedAt:   user.CreatedAt,
+			UpdatedAt:   user.UpdatedAt,
+			Email:       user.Email,
+			IsChirpyRed: user.IsChirpyRed,
 		},
 		Token:        accessToken,
 		RefreshToken: refreshToken,
@@ -363,7 +392,6 @@ func (cfg *apiConfig) handlerChirpsCreate(w http.ResponseWriter, r *http.Request
 		UserID: userID,
 	})
 	if err != nil {
-		log.Printf("Error creating chirp: %s", err)
 		respondWithError(w, http.StatusInternalServerError, "Couldn't create chirp")
 		return
 	}
@@ -403,19 +431,17 @@ func (cfg *apiConfig) handlerUsersCreate(w http.ResponseWriter, r *http.Request)
 		HashedPassword: hashedPassword,
 	})
 	if err != nil {
-		log.Printf("Error creating user: %s", err)
 		respondWithError(w, http.StatusInternalServerError, "Couldn't create user")
 		return
 	}
 
-	respUser := User{
-		ID:        user.ID,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
-	}
-
-	respondWithJSON(w, http.StatusCreated, respUser)
+	respondWithJSON(w, http.StatusCreated, User{
+		ID:          user.ID,
+		CreatedAt:   user.CreatedAt,
+		UpdatedAt:   user.UpdatedAt,
+		Email:       user.Email,
+		IsChirpyRed: user.IsChirpyRed,
+	})
 }
 
 func (cfg *apiConfig) handlerChirpsGetByID(w http.ResponseWriter, r *http.Request) {
@@ -432,7 +458,6 @@ func (cfg *apiConfig) handlerChirpsGetByID(w http.ResponseWriter, r *http.Reques
 			respondWithError(w, http.StatusNotFound, "Chirp not found")
 			return
 		}
-		log.Printf("Error getting chirp: %s", err)
 		respondWithError(w, http.StatusInternalServerError, "Couldn't retrieve chirp")
 		return
 	}
@@ -451,7 +476,6 @@ func (cfg *apiConfig) handlerChirpsGetByID(w http.ResponseWriter, r *http.Reques
 func (cfg *apiConfig) handlerChirpsGet(w http.ResponseWriter, r *http.Request) {
 	dbChirps, err := cfg.DB.GetChirps(r.Context())
 	if err != nil {
-		log.Printf("Error getting chirps: %s", err)
 		respondWithError(w, http.StatusInternalServerError, "Couldn't retrieve chirps")
 		return
 	}
