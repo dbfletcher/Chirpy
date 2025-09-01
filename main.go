@@ -73,7 +73,8 @@ func main() {
 	mux.HandleFunc("GET /api/healthz", handlerReadiness)
 	mux.HandleFunc("POST /api/users", apiCfg.handlerUsersCreate)
 	mux.HandleFunc("POST /api/chirps", apiCfg.handlerChirpsCreate)
-	mux.HandleFunc("GET /api/chirps", apiCfg.handlerChirpsGet) // New endpoint
+	mux.HandleFunc("GET /api/chirps", apiCfg.handlerChirpsGet)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handlerChirpsGetByID)
 
 	// Admin endpoints
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerMetrics)
@@ -89,6 +90,37 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+// handlerChirpsGetByID retrieves a single chirp by its ID.
+func (cfg *apiConfig) handlerChirpsGetByID(w http.ResponseWriter, r *http.Request) {
+	chirpIDStr := r.PathValue("chirpID")
+	chirpID, err := uuid.Parse(chirpIDStr)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid Chirp ID")
+		return
+	}
+
+	dbChirp, err := cfg.DB.GetChirp(r.Context(), chirpID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			respondWithError(w, http.StatusNotFound, "Chirp not found")
+			return
+		}
+		log.Printf("Error getting chirp: %s", err)
+		respondWithError(w, http.StatusInternalServerError, "Couldn't retrieve chirp")
+		return
+	}
+
+	chirp := Chirp{
+		ID:        dbChirp.ID,
+		CreatedAt: dbChirp.CreatedAt,
+		UpdatedAt: dbChirp.UpdatedAt,
+		Body:      dbChirp.Body,
+		UserID:    dbChirp.UserID,
+	}
+
+	respondWithJSON(w, http.StatusOK, chirp)
 }
 
 // handlerChirpsGet retrieves all chirps from the database.
