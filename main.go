@@ -22,6 +22,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	DB             *database.Queries
 	Platform       string
+	jwtSecret      string
 }
 
 type User struct {
@@ -50,6 +51,10 @@ func main() {
 	if dbURL == "" {
 		log.Fatal("DB_URL environment variable is not set")
 	}
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		log.Fatal("JWT_SECRET environment variable is not set")
+	}
 
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -58,8 +63,9 @@ func main() {
 	defer db.Close()
 
 	apiCfg := &apiConfig{
-		DB:       database.New(db),
-		Platform: platform,
+		DB:        database.New(db),
+		Platform:  platform,
+		jwtSecret: jwtSecret,
 	}
 
 	mux := http.NewServeMux()
@@ -94,9 +100,15 @@ func main() {
 
 func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Password string `json:"password"`
-		Email    string `json:"email"`
+		Password         string `json:"password"`
+		Email            string `json:"email"`
+		ExpiresInSeconds *int   `json:"expires_in_seconds"`
 	}
+	type response struct {
+		User
+		Token string `json:"token"`
+	}
+
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
 	err := decoder.Decode(&params)
@@ -122,13 +134,81 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respUser := User{
-		ID:        user.ID,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
+	expiresIn := time.Hour // Default expiration
+	if params.ExpiresInSeconds != nil {
+		requestedExp := time.Duration(*params.ExpiresInSeconds) * time.Second
+		if requestedExp < expiresIn {
+			expiresIn = requestedExp
+		}
 	}
-	respondWithJSON(w, http.StatusOK, respUser)
+
+	token, err := auth.MakeJWT(user.ID, cfg.jwtSecret, expiresIn)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't create JWT")
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, response{
+		User: User{
+			ID:        user.ID,
+			CreatedAt: user.CreatedAt,
+			UpdatedAt: user.UpdatedAt,
+			Email:     user.Email,
+		},
+		Token: token,
+	})
+}
+
+func (cfg *apiConfig) handlerChirpsCreate(w http.ResponseWriter, r *http.Request) {
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Couldn't find JWT")
+		return
+	}
+	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Couldn't validate JWT")
+		return
+	}
+
+	type parameters struct {
+		Body string `json:"body"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err = decoder.Decode(&params)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
+		return
+	}
+
+	const maxChirpLength = 140
+	if len(params.Body) > maxChirpLength {
+		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
+		return
+	}
+
+	cleanedBody := cleanProfanity(params.Body)
+
+	chirp, err := cfg.DB.CreateChirp(r.Context(), database.CreateChirpParams{
+		Body:   cleanedBody,
+		UserID: userID, // Use userID from the validated token
+	})
+	if err != nil {
+		log.Printf("Error creating chirp: %s", err)
+		respondWithError(w, http.StatusInternalServerError, "Couldn't create chirp")
+		return
+	}
+
+	respChirp := Chirp{
+		ID:        chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID,
+	}
+
+	respondWithJSON(w, http.StatusCreated, respChirp)
 }
 
 func (cfg *apiConfig) handlerUsersCreate(w http.ResponseWriter, r *http.Request) {
@@ -170,7 +250,6 @@ func (cfg *apiConfig) handlerUsersCreate(w http.ResponseWriter, r *http.Request)
 	respondWithJSON(w, http.StatusCreated, respUser)
 }
 
-// handlerChirpsGetByID retrieves a single chirp by its ID.
 func (cfg *apiConfig) handlerChirpsGetByID(w http.ResponseWriter, r *http.Request) {
 	chirpIDStr := r.PathValue("chirpID")
 	chirpID, err := uuid.Parse(chirpIDStr)
@@ -201,7 +280,6 @@ func (cfg *apiConfig) handlerChirpsGetByID(w http.ResponseWriter, r *http.Reques
 	respondWithJSON(w, http.StatusOK, chirp)
 }
 
-// handlerChirpsGet retrieves all chirps from the database.
 func (cfg *apiConfig) handlerChirpsGet(w http.ResponseWriter, r *http.Request) {
 	dbChirps, err := cfg.DB.GetChirps(r.Context())
 	if err != nil {
@@ -222,52 +300,6 @@ func (cfg *apiConfig) handlerChirpsGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondWithJSON(w, http.StatusOK, chirps)
-}
-
-// handlerChirpsCreate creates a new chirp, validating it before saving.
-func (cfg *apiConfig) handlerChirpsCreate(w http.ResponseWriter, r *http.Request) {
-	type parameters struct {
-		Body   string    `json:"body"`
-		UserID uuid.UUID `json:"user_id"`
-	}
-	decoder := json.NewDecoder(r.Body)
-	params := parameters{}
-	err := decoder.Decode(&params)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
-		return
-	}
-
-	// Validation logic
-	const maxChirpLength = 140
-	if len(params.Body) > maxChirpLength {
-		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
-		return
-	}
-
-	cleanedBody := cleanProfanity(params.Body)
-
-	// Create the chirp in the database
-	chirp, err := cfg.DB.CreateChirp(r.Context(), database.CreateChirpParams{
-		Body:   cleanedBody,
-		UserID: params.UserID,
-	})
-	if err != nil {
-		log.Printf("Error creating chirp: %s", err)
-		respondWithError(w, http.StatusInternalServerError, "Couldn't create chirp")
-		return
-	}
-
-	// Map to response struct
-	respChirp := Chirp{
-		ID:        chirp.ID,
-		CreatedAt: chirp.CreatedAt,
-		UpdatedAt: chirp.UpdatedAt,
-		Body:      chirp.Body,
-		UserID:    chirp.UserID,
-	}
-
-	respondWithJSON(w, http.StatusCreated, respChirp)
 }
 
 func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
@@ -301,6 +333,7 @@ func cleanProfanity(text string) string {
 	return strings.Join(words, " ")
 }
 
+// CORRECTED
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg.fileserverHits.Add(1)
