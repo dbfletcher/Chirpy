@@ -14,6 +14,22 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// GetAPIKey extracts an API key from the Authorization header.
+// The header is expected to be in the format "ApiKey {key}".
+func GetAPIKey(headers http.Header) (string, error) {
+	authHeader := headers.Get("Authorization")
+	if authHeader == "" {
+		return "", errors.New("authorization header not found")
+	}
+
+	parts := strings.Split(authHeader, " ")
+	if len(parts) != 2 || strings.ToLower(parts[0]) != "apikey" {
+		return "", errors.New("malformed authorization header")
+	}
+
+	return parts[1], nil
+}
+
 // MakeRefreshToken generates a random 256-bit hex string.
 func MakeRefreshToken() (string, error) {
 	b := make([]byte, 32)

@@ -23,6 +23,7 @@ type apiConfig struct {
 	DB             *database.Queries
 	Platform       string
 	jwtSecret      string
+	polkaKey       string
 }
 
 type User struct {
@@ -56,6 +57,10 @@ func main() {
 	if jwtSecret == "" {
 		log.Fatal("JWT_SECRET environment variable is not set")
 	}
+	polkaKey := os.Getenv("POLKA_KEY")
+	if polkaKey == "" {
+		log.Fatal("POLKA_KEY environment variable is not set")
+	}
 
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -67,6 +72,7 @@ func main() {
 		DB:        database.New(db),
 		Platform:  platform,
 		jwtSecret: jwtSecret,
+		polkaKey:  polkaKey,
 	}
 
 	mux := http.NewServeMux()
@@ -86,7 +92,7 @@ func main() {
 	mux.HandleFunc("GET /api/chirps", apiCfg.handlerChirpsGet)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handlerChirpsGetByID)
 	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.handlerChirpsDelete)
-	mux.HandleFunc("POST /api/polka/webhooks", apiCfg.handlerWebhookPolka) // New endpoint
+	mux.HandleFunc("POST /api/polka/webhooks", apiCfg.handlerWebhookPolka)
 
 	// Admin endpoints
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerMetrics)
@@ -105,6 +111,16 @@ func main() {
 }
 
 func (cfg *apiConfig) handlerWebhookPolka(w http.ResponseWriter, r *http.Request) {
+	apiKey, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Couldn't find API key")
+		return
+	}
+	if apiKey != cfg.polkaKey {
+		respondWithError(w, http.StatusUnauthorized, "Invalid API key")
+		return
+	}
+
 	type parameters struct {
 		Event string `json:"event"`
 		Data  struct {
@@ -114,7 +130,7 @@ func (cfg *apiConfig) handlerWebhookPolka(w http.ResponseWriter, r *http.Request
 
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
-	err := decoder.Decode(&params)
+	err = decoder.Decode(&params)
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Invalid request payload")
 		return
