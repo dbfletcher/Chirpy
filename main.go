@@ -73,6 +73,7 @@ func main() {
 	mux.HandleFunc("GET /api/healthz", handlerReadiness)
 	mux.HandleFunc("POST /api/users", apiCfg.handlerUsersCreate)
 	mux.HandleFunc("POST /api/chirps", apiCfg.handlerChirpsCreate)
+	mux.HandleFunc("GET /api/chirps", apiCfg.handlerChirpsGet) // New endpoint
 
 	// Admin endpoints
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerMetrics)
@@ -88,6 +89,29 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+// handlerChirpsGet retrieves all chirps from the database.
+func (cfg *apiConfig) handlerChirpsGet(w http.ResponseWriter, r *http.Request) {
+	dbChirps, err := cfg.DB.GetChirps(r.Context())
+	if err != nil {
+		log.Printf("Error getting chirps: %s", err)
+		respondWithError(w, http.StatusInternalServerError, "Couldn't retrieve chirps")
+		return
+	}
+
+	chirps := []Chirp{}
+	for _, dbChirp := range dbChirps {
+		chirps = append(chirps, Chirp{
+			ID:        dbChirp.ID,
+			CreatedAt: dbChirp.CreatedAt,
+			UpdatedAt: dbChirp.UpdatedAt,
+			Body:      dbChirp.Body,
+			UserID:    dbChirp.UserID,
+		})
+	}
+
+	respondWithJSON(w, http.StatusOK, chirps)
 }
 
 // handlerChirpsCreate creates a new chirp, validating it before saving.
@@ -180,7 +204,6 @@ func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// CORRECTED FUNCTION SIGNATURE
 func cleanProfanity(text string) string {
 	profaneWords := map[string]struct{}{
 		"kerfuffle": {},
